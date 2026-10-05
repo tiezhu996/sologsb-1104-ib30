@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import type { Furniture, FurnitureName } from '../types/furniture'
 import type { JointType } from '../types/jointType'
 import type { Member } from '../types/member'
+import { leaseManager } from '../leases/leaseManager'
 import { db, ensureSeedData } from '../utils/db'
 
 export type JointDraft = Omit<JointType, 'id' | 'schemaRev'>
@@ -27,6 +28,11 @@ interface JointState {
 
 function createId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+}
+
+/** 构件修改由租约工作区留底并受 fence 保护落库；迟到旧页写入在此被拒 */
+async function commitMemberChange(next: Member): Promise<void> {
+  await leaseManager.commitMember(next.jointTypeId, next)
 }
 
 export const useJointStore = create<JointState>((set, get) => ({
@@ -79,29 +85,35 @@ export const useJointStore = create<JointState>((set, get) => ({
   },
 
   addFurniture: async (draft) => {
-    const furniture: Furniture = { ...draft, id: createId('furniture'), schemaRev: 2 }
-    await db.furniture.add(furniture)
-    set((state) => ({ furniture: [...state.furniture, furniture] }))
-    return furniture
+    // 家具关系同样归编辑租约：反查页新建时临时领取，写完立即交还
+    return leaseManager.withQuickLease(draft.jointTypeId, async () => {
+      const furniture: Furniture = { ...draft, id: createId('furniture'), schemaRev: 2 }
+      leaseManager.patchDraft(draft.jointTypeId, 'furniture', (rows) => [...rows, furniture])
+      await db.furniture.add(furniture)
+      set((state) => ({ furniture: [...state.furniture, furniture] }))
+      return furniture
+    })
   },
 
   setSelectedJoint: (id) => set({ selectedJointId: id }),
 
   updateMemberDimensions: async (memberId, dimensions) => {
-    await db.members.update(memberId, dimensions)
+    const member = get().members.find((item) => item.id === memberId)
+    if (!member) return
+    const next: Member = { ...member, ...dimensions, schemaRev: member.schemaRev ?? 2 }
+    await commitMemberChange(next)
     set((state) => ({
-      members: state.members.map((member) => (
-        member.id === memberId ? { ...member, ...dimensions } : member
-      )),
+      members: state.members.map((item) => (item.id === memberId ? next : item)),
     }))
   },
 
   renameMember: async (memberId, name) => {
-    await db.members.update(memberId, { name })
+    const member = get().members.find((item) => item.id === memberId)
+    if (!member) return
+    const next: Member = { ...member, name, schemaRev: member.schemaRev ?? 2 }
+    await commitMemberChange(next)
     set((state) => ({
-      members: state.members.map((member) => (
-        member.id === memberId ? { ...member, name } : member
-      )),
+      members: state.members.map((item) => (item.id === memberId ? next : item)),
     }))
   },
 }))

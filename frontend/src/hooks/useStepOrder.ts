@@ -34,8 +34,8 @@ export function useStepOrder(jointTypeId: string): StepOrderResult {
   )
 
   const move = useCallback(async (from: number, to: number) => {
-    await useStepStore.getState().moveStep(from, to)
-  }, [])
+    await useStepStore.getState().moveStep(jointTypeId, from, to)
+  }, [jointTypeId])
 
   return {
     steps,

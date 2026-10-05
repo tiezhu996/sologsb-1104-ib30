@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { BlankPanel } from '../components/common/BlankPanel'
+import { LeaseBusyError } from '../leases/leaseManager'
 import { useJointStore } from '../stores/jointStore'
 import type { FurnitureName } from '../types/furniture'
 
@@ -28,6 +29,7 @@ export default function FurnitureIndex() {
   const addFurniture = useJointStore((state) => state.addFurniture)
   const [showForm, setShowForm] = useState(false)
   const [form, setForm] = useState<FurnitureFormState>(initialForm)
+  const [formError, setFormError] = useState<string | null>(null)
 
   useEffect(() => {
     void loadAll()
@@ -42,15 +44,24 @@ export default function FurnitureIndex() {
   const submitFurniture = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (!form.jointTypeId || !form.name.trim() || !form.position.trim() || !form.loadNote.trim()) return
-    await addFurniture({
-      ...form,
-      name: form.name.trim() as FurnitureName,
-      era: form.era.trim() || '未标注年代',
-      position: form.position.trim(),
-      loadNote: form.loadNote.trim(),
-    })
-    setForm({ ...initialForm, jointTypeId: joints[0]?.id ?? '' })
-    setShowForm(false)
+    setFormError(null)
+    try {
+      await addFurniture({
+        ...form,
+        name: form.name.trim() as FurnitureName,
+        era: form.era.trim() || '未标注年代',
+        position: form.position.trim(),
+        loadNote: form.loadNote.trim(),
+      })
+      setForm({ ...initialForm, jointTypeId: joints[0]?.id ?? '' })
+      setShowForm(false)
+    } catch (error) {
+      if (error instanceof LeaseBusyError) {
+        setFormError(`${error.message}。家具关系与该榫卯的构件、步序、内联图共用同一份编辑租约，请稍后再试或到对应编辑页接管。`)
+      } else {
+        setFormError('保存失败，内容可稍后重试。')
+      }
+    }
   }
 
   const groups = furniture.reduce<Array<{ name: FurnitureName; items: typeof furniture }>>((result, item) => {
@@ -164,9 +175,14 @@ export default function FurnitureIndex() {
             </label>
           </div>
           <div className="flex justify-end gap-3">
-            <button type="button" className="secondary-button" onClick={() => setShowForm(false)}>取消</button>
+            <button type="button" className="secondary-button" onClick={() => { setShowForm(false); setFormError(null) }}>取消</button>
             <button type="submit" className="primary-button" data-testid="submit-furniture">保存家具关联</button>
           </div>
+          {formError && (
+            <p className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800" data-testid="form-error">
+              {formError}
+            </p>
+          )}
         </form>
       ) : null}
 

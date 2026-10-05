@@ -5,15 +5,81 @@ import type { JointType } from '../types/jointType'
 import type { Member } from '../types/member'
 import type { DisassemblyStep } from '../types/step'
 
+/** 租约记录：同一榫卯（resourceId）全局只有一条，fence 单调递增用于拦截旧写者 */
+export interface EditLease {
+  resourceId: string
+  leaseId: string
+  holder: string
+  fence: number
+  /** 心跳到期时间戳（毫秒），过期后其他标签页可接管 */
+  expiresAt: number
+  acquiredAt: number
+  renewedAt: number
+  crashed: number
+  /** 正常交还时标记；接管时由新写者读取并清空 */
+  released: number
+}
+
+/** 写者工作区：当前租约下尚未确认入库的整份编辑快照（构件尺寸 / 拆装动作 / 内联图 / 家具关系） */
+export interface WorkspaceDraft {
+  leaseId: string
+  resourceId: string
+  fence: number
+  baseFence: number
+  holder: string
+  updatedAt: number
+  members: Member[]
+  steps: DisassemblyStep[]
+  diagrams: Diagram[]
+  furniture: Furniture[]
+}
+
+/** 交接待复核：旧租约被接管时，其上一版未确认修改原样保留 */
+export interface PendingStash {
+  id: string
+  resourceId: string
+  leaseId: string
+  fence: number
+  holder: string
+  reason: 'timeout' | 'crash' | 'release'
+  createdAt: number
+  members: Member[]
+  steps: DisassemblyStep[]
+  diagrams: Diagram[]
+  furniture: Furniture[]
+  status: 'pending' | 'merged' | 'discarded'
+  resolvedAt?: number
+}
+
+/** 写入失败/崩溃恢复队列：所有经租约提交的写操作先入队再落库，重开后可找回重试 */
+export interface PendingCommit {
+  id: string
+  resourceId: string
+  leaseId: string
+  fence: number
+  holder: string
+  createdAt: number
+  attempts: number
+  lastError: string
+  status: 'pending' | 'applied' | 'rejected'
+  kind: 'member' | 'steps' | 'diagram' | 'furniture'
+  payload: unknown
+}
+
 export class MortiseDatabase extends Dexie {
   joints!: Table<JointType, string>
   members!: Table<Member, string>
   steps!: Table<DisassemblyStep, string>
   diagrams!: Table<Diagram, string>
   furniture!: Table<Furniture, string>
+  leases!: Table<EditLease, string>
+  workspaces!: Table<WorkspaceDraft, string>
+  stashes!: Table<PendingStash, string>
+  commits!: Table<PendingCommit, string>
+  meta!: Table<{ key: string; value: number }, string>
 
-  constructor() {
-    super('gbmortise-db')
+  constructor(name = 'gbmortise-db', options?: ConstructorParameters<typeof Dexie>[1]) {
+    super(name, options)
     const schema = {
       joints: 'id, name, family, difficulty',
       members: 'id, jointTypeId, name, part, lengthMm',
@@ -39,6 +105,14 @@ export class MortiseDatabase extends Dexie {
       await transaction.table<Furniture, string>('furniture').toCollection().modify((furniture) => {
         furniture.schemaRev = 2
       })
+    })
+    this.version(3).stores({
+      ...schema,
+      leases: 'resourceId, leaseId, fence, expiresAt',
+      workspaces: 'leaseId, resourceId, fence',
+      stashes: 'id, resourceId, status, createdAt',
+      commits: 'id, resourceId, status, createdAt',
+      meta: 'key',
     })
   }
 }
