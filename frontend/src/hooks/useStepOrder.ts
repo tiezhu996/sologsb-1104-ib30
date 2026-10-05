@@ -10,8 +10,8 @@ interface StepOrderResult {
   setCurrentStep: (index: number) => void
 }
 
-export function useStepOrder(jointTypeId: string): StepOrderResult {
-  const allSteps = useStepStore((state) => state.steps)
+export function useStepOrder(jointTypeId: string, fence: number | null): StepOrderResult {
+  const allSteps = useStepStore((state) => state.stepsByJoint[jointTypeId])
   const currentStepIndex = useStepStore((state) => state.currentStepIndex)
   const loadSteps = useStepStore((state) => state.loadSteps)
   const setCurrentStep = useStepStore((state) => state.setCurrentStep)
@@ -22,7 +22,7 @@ export function useStepOrder(jointTypeId: string): StepOrderResult {
   }, [jointTypeId, loadSteps])
 
   const steps = useMemo(
-    () => allSteps
+    () => (allSteps ?? [])
       .filter((step) => step.jointTypeId === jointTypeId)
       .sort((a, b) => a.seq - b.seq),
     [allSteps, jointTypeId],
@@ -34,8 +34,9 @@ export function useStepOrder(jointTypeId: string): StepOrderResult {
   )
 
   const move = useCallback(async (from: number, to: number) => {
-    await useStepStore.getState().moveStep(from, to)
-  }, [])
+    if (fence === null) return
+    await useStepStore.getState().moveStep(jointTypeId, fence, useStepStore.getState().stepsByJoint[jointTypeId] ?? [], from, to)
+  }, [jointTypeId, fence])
 
   return {
     steps,

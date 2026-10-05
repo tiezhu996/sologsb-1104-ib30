@@ -1,34 +1,81 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { BlankPanel } from '../components/common/BlankPanel'
 import { DifficultyTag } from '../components/common/DifficultyTag'
+import { LeaseBar } from '../components/common/LeaseBar'
+import { PendingReviewPanel } from '../components/common/PendingReviewPanel'
 import { SizeField } from '../components/common/SizeField'
 import { StepRail } from '../components/common/StepRail'
-import { useStepOrder } from '../hooks/useStepOrder'
+import { useJointLease } from '../hooks/useJointLease'
+import { useJointWorkspace } from '../hooks/useJointWorkspace'
 import { useJointStore } from '../stores/jointStore'
+import { useStageStore } from '../stores/stageStore'
+import { useStepStore } from '../stores/stepStore'
 import { checkTolerance, formatDimension } from '../utils/measure'
 import { exportJointData } from '../utils/export'
+import { LeaseExpiredError } from '../utils/leaseManager'
 
 export default function JointDetail() {
   const { id: idParam } = useParams()
   const id = idParam ?? ''
   const joints = useJointStore((state) => state.joints)
-  const members = useJointStore((state) => state.members)
-  const furniture = useJointStore((state) => state.furniture)
   const loading = useJointStore((state) => state.loading)
   const loadAll = useJointStore((state) => state.loadAll)
   const updateMemberDimensions = useJointStore((state) => state.updateMemberDimensions)
-  const { steps, totalDurationSec, currentStepIndex, move, setCurrentStep } = useStepOrder(id)
+  const lease = useJointLease(id)
+  const workspace = useJointWorkspace(id)
+  const commit = useStageStore((state) => state.commit)
+  const discard = useStageStore((state) => state.discard)
+  const adopt = useStageStore((state) => state.adopt)
+  const [currentStepIndex, setCurrentStepIndex] = useState(0)
+  const [writeError, setWriteError] = useState<string | null>(null)
 
   useEffect(() => {
     void loadAll()
   }, [loadAll])
 
+  // 失去租约（被接管/超时）后清掉上一次的报错，等重新领取
+  useEffect(() => {
+    if (lease.status === 'held') setWriteError(null)
+  }, [lease.status])
+
   const joint = joints.find((item) => item.id === id)
-  const currentMembers = members
-    .filter((member) => member.jointTypeId === id)
-    .sort((a, b) => a.lengthMm - b.lengthMm)
-  const currentFurniture = furniture.filter((item) => item.jointTypeId === id)
+  const currentMembers = [...workspace.members].sort((a, b) => a.lengthMm - b.lengthMm)
+  const currentFurniture = workspace.furniture
+  const steps = workspace.steps
+  const safeStepIndex = Math.min(currentStepIndex, Math.max(0, steps.length - 1))
+  const totalDurationSec = steps.reduce((total, step) => total + step.holdSec, 0)
+  const editable = lease.status === 'held'
+
+  const guardDimensions = async (
+    memberId: string,
+    dimensions: Parameters<typeof updateMemberDimensions>[2],
+  ) => {
+    if (!editable || lease.lease === null) return
+    setWriteError(null)
+    try {
+      await updateMemberDimensions(id, memberId, dimensions)
+    } catch (error) {
+      const message = error instanceof LeaseExpiredError
+        ? error.message
+        : '写入暂存失败，请重试；已确认的修改不受影响。'
+      setWriteError(message)
+      if (error instanceof LeaseExpiredError) await lease.refresh().catch(() => {})
+    }
+  }
+
+  const guardStepMove = async (from: number, to: number) => {
+    if (!editable || lease.lease === null) return
+    setWriteError(null)
+    try {
+      await useStepStore.getState().moveStep(id, lease.lease.fence, workspace.steps, from, to)
+    } catch (error) {
+      setWriteError(error instanceof LeaseExpiredError
+        ? error.message
+        : '步序暂存失败，已回滚，请重试。')
+      if (error instanceof LeaseExpiredError) await lease.refresh().catch(() => {})
+    }
+  }
 
   if (!joint && !loading) {
     return (
@@ -49,6 +96,13 @@ export default function JointDetail() {
           <span aria-hidden="true">←</span> 返回图鉴总览
         </Link>
       </div>
+
+      <LeaseBar lease={lease} jointName={joint.name} onTakeOver={() => void lease.acquire()} />
+      {writeError ? (
+        <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800" data-testid="write-error">
+          {writeError}
+        </div>
+      ) : null}
 
       <section className="panel overflow-hidden">
         <div className="relative grid gap-6 p-6 lg:grid-cols-[1fr_auto] lg:items-start sm:p-8">
@@ -75,11 +129,27 @@ export default function JointDetail() {
         </div>
       </section>
 
+      <PendingReviewPanel
+        jointTypeId={id}
+        pending={workspace.stageEntries.filter((entry) => !entry.refId && !entry.fromLateSave)}
+        review={workspace.reviewEntries}
+        canCommit={editable}
+        fence={lease.lease?.fence ?? null}
+        onCommit={(fence) => commit(id, fence)}
+        onDiscard={(entryId) => discard(id, entryId)}
+        onAdopt={(entryId) => adopt(id, entryId)}
+        onReload={workspace.reload}
+      />
+
       <section className="space-y-4">
         <div className="flex items-end justify-between gap-4">
           <div>
             <h2 className="text-xl font-semibold text-wood-900">构件尺寸与公差</h2>
-            <p className="mt-1 text-sm text-stone-500">按短料优先排列，可直接在毫米与寸之间切换录入。</p>
+            <p className="mt-1 text-sm text-stone-500">
+              {editable
+                ? '按短料优先排列，可直接在毫米与寸之间切换录入，修改先进暂存。'
+                : '当前为只读：尺寸修改归持有编辑租约的标签页，接管后再编辑。'}
+            </p>
           </div>
           <span className="text-xs text-stone-500">基准间隙 0.20 mm，允许偏离 ±0.12 mm</span>
         </div>
@@ -115,7 +185,8 @@ export default function JointDetail() {
                           label={`${member.name}长度`}
                           valueMm={member.lengthMm}
                           toleranceMm={member.toleranceMm}
-                          onChange={(value) => void updateMemberDimensions(member.id, {
+                          readOnly={!editable}
+                          onChange={(value) => void guardDimensions(member.id, {
                             lengthMm: value,
                             widthMm: member.widthMm,
                             thicknessMm: member.thicknessMm,
@@ -128,7 +199,8 @@ export default function JointDetail() {
                           label={`${member.name}宽度`}
                           valueMm={member.widthMm}
                           toleranceMm={member.toleranceMm}
-                          onChange={(value) => void updateMemberDimensions(member.id, {
+                          readOnly={!editable}
+                          onChange={(value) => void guardDimensions(member.id, {
                             lengthMm: member.lengthMm,
                             widthMm: value,
                             thicknessMm: member.thicknessMm,
@@ -141,7 +213,8 @@ export default function JointDetail() {
                           label={`${member.name}厚度`}
                           valueMm={member.thicknessMm}
                           toleranceMm={member.toleranceMm}
-                          onChange={(value) => void updateMemberDimensions(member.id, {
+                          readOnly={!editable}
+                          onChange={(value) => void guardDimensions(member.id, {
                             lengthMm: member.lengthMm,
                             widthMm: member.widthMm,
                             thicknessMm: value,
@@ -176,19 +249,27 @@ export default function JointDetail() {
             <p className="mt-1 text-sm text-stone-500">反查该榫卯在实际家具中的位置与承力作用。</p>
           </div>
           {currentFurniture.length === 0 ? (
-            <BlankPanel title="尚未关联家具" description="可在家具反查页登记使用部位。" />
+            <BlankPanel title="尚未关联家具" description="可在家具反查页登记使用部位（归属同一编辑租约）。" />
           ) : (
             <div className="space-y-3">
-              {currentFurniture.map((item) => (
-                <article key={item.id} className="panel p-4">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <h3 className="font-semibold text-wood-900">{item.name}</h3>
-                    <span className="rounded-full bg-wood-50 px-2.5 py-1 text-xs text-wood-700">{item.era}</span>
-                  </div>
-                  <p className="mt-2 text-sm font-medium text-stone-700">{item.position}</p>
-                  <p className="mt-2 text-xs leading-5 text-stone-500">{item.loadNote}</p>
-                </article>
-              ))}
+              {currentFurniture.map((item) => {
+                const isPending = workspace.stageEntries.some(
+                  (entry) => !entry.refId && entry.kind === 'furniture' && entry.furniture.id === item.id,
+                )
+                return (
+                  <article key={item.id} className="panel p-4">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h3 className="font-semibold text-wood-900">{item.name}</h3>
+                      <span className="rounded-full bg-wood-50 px-2.5 py-1 text-xs text-wood-700">{item.era}</span>
+                      {isPending ? (
+                        <span className="rounded-full bg-sky-100 px-2.5 py-1 text-[11px] text-sky-900">待确认入库</span>
+                      ) : null}
+                    </div>
+                    <p className="mt-2 text-sm font-medium text-stone-700">{item.position}</p>
+                    <p className="mt-2 text-xs leading-5 text-stone-500">{item.loadNote}</p>
+                  </article>
+                )
+              })}
             </div>
           )}
         </div>
@@ -197,14 +278,19 @@ export default function JointDetail() {
           <div className="flex items-end justify-between gap-4">
             <div>
               <h2 className="text-xl font-semibold text-wood-900">拆装步序</h2>
-              <p className="mt-1 text-sm text-stone-500">点击步骤查看风险提醒，也可直接拖动调整顺序。</p>
+              <p className="mt-1 text-sm text-stone-500">点击步骤查看风险提醒；调序请进入步序编排页。</p>
             </div>
             <span className="text-xs text-wood-700">共 {totalDurationSec} 秒</span>
           </div>
           {steps.length === 0 ? (
             <BlankPanel title="尚无拆装步骤" description="进入步序编排页补充拆装动作。" />
           ) : (
-            <StepRail steps={steps} currentIndex={currentStepIndex} onSelect={setCurrentStep} onMove={(from, to) => void move(from, to)} />
+            <StepRail
+              steps={steps}
+              currentIndex={safeStepIndex}
+              onSelect={(index) => setCurrentStepIndex(index)}
+              onMove={(from, to) => void guardStepMove(from, to)}
+            />
           )}
         </div>
       </section>

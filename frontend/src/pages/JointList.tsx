@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { BlankPanel } from '../components/common/BlankPanel'
 import { DifficultyTag } from '../components/common/DifficultyTag'
 import { useJointStore } from '../stores/jointStore'
+import { useStageStore } from '../stores/stageStore'
 import type { JointDifficulty, JointFamily, JointName, JointType } from '../types/jointType'
 import { exportAllData } from '../utils/export'
 
@@ -32,6 +33,8 @@ export default function JointList() {
   const loading = useJointStore((state) => state.loading)
   const loadAll = useJointStore((state) => state.loadAll)
   const addJoint = useJointStore((state) => state.addJoint)
+  const stagesMap = useStageStore((state) => state.stages)
+  const loadAllStages = useStageStore((state) => state.loadAll)
   const [showForm, setShowForm] = useState(false)
   const [form, setForm] = useState<JointFormState>(initialForm)
   const familyGroups = Array.from(new Set([...families, ...joints.map((joint) => joint.family)]))
@@ -40,6 +43,22 @@ export default function JointList() {
   useEffect(() => {
     void loadAll()
   }, [loadAll])
+
+  useEffect(() => {
+    void loadAllStages()
+  }, [loadAllStages])
+
+  const stageSummary = new Map(
+    Object.values(stagesMap)
+      .filter((stage): stage is NonNullable<typeof stage> => Boolean(stage))
+      .map((stage) => [
+        stage.jointTypeId,
+        {
+          pending: stage.entries.filter((entry) => !entry.refId && !entry.fromLateSave).length,
+          review: stage.entries.filter((entry) => Boolean(entry.refId) || entry.fromLateSave).length,
+        },
+      ]),
+  )
 
   const submitJoint = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -198,6 +217,8 @@ export default function JointList() {
                             joint={joint}
                             memberCount={members.filter((member) => member.jointTypeId === joint.id).length}
                             stepCount={stepCounts[joint.id] ?? 0}
+                            pending={stageSummary.get(joint.id)?.pending ?? 0}
+                            review={stageSummary.get(joint.id)?.review ?? 0}
                           />
                         ))}
                       </div>
@@ -217,9 +238,11 @@ interface JointCardProps {
   joint: JointType
   memberCount: number
   stepCount: number
+  pending: number
+  review: number
 }
 
-function JointCard({ joint, memberCount, stepCount }: JointCardProps) {
+function JointCard({ joint, memberCount, stepCount, pending, review }: JointCardProps) {
   return (
     <Link
       to={`/joints/${joint.id}`}
@@ -235,6 +258,20 @@ function JointCard({ joint, memberCount, stepCount }: JointCardProps) {
           </div>
           <DifficultyTag difficulty={joint.difficulty} compact />
         </div>
+        {pending > 0 || review > 0 ? (
+          <div className="mt-3 flex flex-wrap gap-2" data-testid="joint-stage-badge">
+            {pending > 0 ? (
+              <span className="rounded-full bg-sky-100 px-2.5 py-1 text-[11px] font-medium text-sky-900">
+                {pending} 项待确认入库
+              </span>
+            ) : null}
+            {review > 0 ? (
+              <span className="rounded-full bg-amber-100 px-2.5 py-1 text-[11px] font-medium text-amber-900">
+                {review} 项待复核交接
+              </span>
+            ) : null}
+          </div>
+        ) : null}
         <p className="mt-4 min-h-12 text-sm leading-6 text-stone-600">{joint.strengthNote}</p>
         <div className="mt-5 flex items-center gap-4 border-t border-stone-100 pt-4 text-xs text-stone-500">
           <span><strong className="mr-1 text-base text-wood-700">{memberCount}</strong>件构件</span>

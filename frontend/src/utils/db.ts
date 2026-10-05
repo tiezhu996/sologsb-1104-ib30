@@ -2,6 +2,7 @@ import Dexie, { type Table } from 'dexie'
 import type { Diagram, HitArea } from '../types/diagram'
 import type { Furniture } from '../types/furniture'
 import type { JointType } from '../types/jointType'
+import type { LeaseRecord, EditStage } from '../types/lease'
 import type { Member } from '../types/member'
 import type { DisassemblyStep } from '../types/step'
 
@@ -11,6 +12,10 @@ export class MortiseDatabase extends Dexie {
   steps!: Table<DisassemblyStep, string>
   diagrams!: Table<Diagram, string>
   furniture!: Table<Furniture, string>
+  /** 编辑租约：每个榫卯至多一条未过期记录；自增主键即 fence 世代号 */
+  leases!: Table<LeaseRecord, number>
+  /** 未确认修改暂存区：每个榫卯一条记录，交接与崩溃重开都从这里找回 */
+  stages!: Table<EditStage, string>
 
   constructor() {
     super('gbmortise-db')
@@ -20,6 +25,11 @@ export class MortiseDatabase extends Dexie {
       steps: 'id, jointTypeId, seq, action',
       diagrams: 'id, jointTypeId, stepId, view',
       furniture: 'id, jointTypeId, name',
+    }
+    const leaseSchema = {
+      // fence 既是自增主键（租约世代号），也带普通索引便于按榫卯/持有者查询
+      leases: '++fence, jointTypeId, holderId, expiresAt',
+      stages: 'jointTypeId, updatedAt',
     }
 
     this.version(1).stores(schema)
@@ -40,6 +50,9 @@ export class MortiseDatabase extends Dexie {
         furniture.schemaRev = 2
       })
     })
+    // version(3)：单写者租约交接。新增 leases / stages，老库升级时无需回填，
+    // 暂存区在首次进入编辑时按需创建。
+    this.version(3).stores({ ...schema, ...leaseSchema })
   }
 }
 

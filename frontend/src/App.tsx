@@ -1,4 +1,5 @@
 import { NavLink } from 'react-router-dom'
+import { RemoteCatalogSync } from './components/common/RemoteCatalogSync'
 import AppRoutes from './router'
 
 const navItems = [
@@ -39,6 +40,7 @@ export default function App() {
         </div>
       </header>
       <main className="mx-auto w-full max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
+        <RemoteCatalogSync />
         <AppRoutes />
       </main>
       <footer className="mt-12 border-t border-wood-100 bg-white/70">

@@ -1,9 +1,19 @@
 import { create } from 'zustand'
 import type { Diagram } from '../types/diagram'
 import { db } from '../utils/db'
+import { editBus } from '../utils/editBus'
+import { leaseManager } from '../utils/leaseManager'
+import { stageDiagram } from '../utils/stageService'
+import { useStageStore } from './stageStore'
+
+function notifyStaged(jointTypeId: string): void {
+  void useStageStore.getState().loadForJoint(jointTypeId)
+  editBus.post({ type: 'stage-updated', jointTypeId, byHolderId: leaseManager.holder.id })
+}
 
 interface DiagramState {
-  diagrams: Diagram[]
+  /** 各榫卯的示意图工作副本（含待确认修改） */
+  diagramsByJoint: Record<string, Diagram[]>
   selectedDiagramId: string | null
   selectedMemberId: string | null
   draftSvgMarkup: string
@@ -14,12 +24,18 @@ interface DiagramState {
   setSelectedMember: (id: string | null) => void
   setDraftSvgMarkup: (markup: string) => void
   setDraftTitle: (title: string) => void
-  saveDraft: () => Promise<void>
-  saveDiagram: (diagram: Diagram) => Promise<void>
+  /** 保存内联图归属编辑租约：只写暂存区，确认后才入正表 */
+  saveDraft: (
+    jointTypeId: string,
+    fence: number,
+    base: Diagram,
+    title: string,
+    svgMarkup: string,
+  ) => Promise<Diagram>
 }
 
 export const useDiagramStore = create<DiagramState>((set, get) => ({
-  diagrams: [],
+  diagramsByJoint: {},
   selectedDiagramId: null,
   selectedMemberId: null,
   draftSvgMarkup: '',
@@ -36,7 +52,7 @@ export const useDiagramStore = create<DiagramState>((set, get) => ({
           : diagrams[0]?.id ?? null
         const selected = diagrams.find((diagram) => diagram.id === selectedDiagramId)
         return {
-          diagrams,
+          diagramsByJoint: { ...state.diagramsByJoint, [jointTypeId]: diagrams },
           selectedDiagramId,
           selectedMemberId: selectedDiagramId === state.selectedDiagramId ? state.selectedMemberId : null,
           draftSvgMarkup: selected?.svgMarkup ?? '',
@@ -49,7 +65,8 @@ export const useDiagramStore = create<DiagramState>((set, get) => ({
   },
 
   setSelectedDiagram: (id) => set((state) => {
-    const selected = state.diagrams.find((diagram) => diagram.id === id)
+    const diagrams = Object.values(state.diagramsByJoint).flat()
+    const selected = diagrams.find((diagram) => diagram.id === id)
     return {
       selectedDiagramId: id,
       selectedMemberId: null,
@@ -62,24 +79,29 @@ export const useDiagramStore = create<DiagramState>((set, get) => ({
   setDraftSvgMarkup: (markup) => set({ draftSvgMarkup: markup }),
   setDraftTitle: (title) => set({ draftTitle: title }),
 
-  saveDraft: async () => {
-    const state = get()
-    const selected = state.diagrams.find((diagram) => diagram.id === state.selectedDiagramId)
-    if (!selected) return
+  saveDraft: async (jointTypeId, fence, base, title, svgMarkup) => {
     const updated: Diagram = {
-      ...selected,
-      title: state.draftTitle.trim() || selected.title,
-      svgMarkup: state.draftSvgMarkup,
+      ...base,
+      title: title.trim() || base.title,
+      svgMarkup,
     }
-    await state.saveDiagram(updated)
-  },
-
-  saveDiagram: async (diagram) => {
-    await db.diagrams.put(diagram)
-    set((state) => ({
-      diagrams: state.diagrams.map((item) => item.id === diagram.id ? diagram : item),
-      draftSvgMarkup: state.selectedDiagramId === diagram.id ? diagram.svgMarkup : state.draftSvgMarkup,
-      draftTitle: state.selectedDiagramId === diagram.id ? diagram.title : state.draftTitle,
+    try {
+      await stageDiagram(jointTypeId, fence, updated)
+      notifyStaged(jointTypeId)
+    } catch (error) {
+      await get().loadDiagrams(jointTypeId)
+      void useStageStore.getState().loadForJoint(jointTypeId)
+      throw error
+    }
+    set((current) => ({
+      diagramsByJoint: {
+        ...current.diagramsByJoint,
+        [jointTypeId]: (current.diagramsByJoint[jointTypeId] ?? [])
+          .map((item) => (item.id === updated.id ? updated : item)),
+      },
+      draftTitle: updated.title,
+      draftSvgMarkup: updated.svgMarkup,
     }))
+    return updated
   },
 }))
